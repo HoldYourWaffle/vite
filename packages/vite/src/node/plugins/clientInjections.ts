@@ -33,6 +33,7 @@ export function clientInjectionsPlugin(config: ResolvedConfig): Plugin {
   return {
     name: 'vite:client-inject',
     async buildStart() {
+      // HERE
       const resolvedServerHostname = (await resolveHostname(config.server.host))
         .name
       const resolvedServerPort = config.server.port!

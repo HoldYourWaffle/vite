@@ -1551,6 +1551,7 @@ export async function resolveConfig(
       },
     ),
     safeModulePaths: new Set<string>(),
+    // HERE
     additionalAllowedHosts: getAdditionalAllowedHosts(server, preview),
   }
   resolved = {

@@ -9,6 +9,7 @@ const allowedHostsPreviewCache = new WeakMap<ResolvedConfig, Set<string>>()
 const isFileOrExtensionProtocolRE = /^(?:file|.+-extension):/i
 
 export function getAdditionalAllowedHosts(
+  // HERE
   resolvedServerOptions: Pick<ResolvedServerOptions, 'host' | 'hmr' | 'origin'>,
   resolvedPreviewOptions: Pick<ResolvedPreviewOptions, 'host'>,
 ): string[] {

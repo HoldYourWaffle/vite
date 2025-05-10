@@ -191,7 +191,6 @@ export interface ResolvedServerOptions
   extends Omit<
     RequiredExceptFor<
       ServerOptions,
-      | 'host'
       | 'https'
       | 'proxy'
       | 'hmr'
@@ -200,7 +199,8 @@ export interface ResolvedServerOptions
       | 'origin'
       | 'hotUpdateEnvironments'
     >,
-    'fs' | 'middlewareMode' | 'sourcemapIgnoreList'
+    // `port` and `host` are resolved into `listenOptions`
+    'port' | 'host' | 'fs' | 'middlewareMode' | 'sourcemapIgnoreList'
   > {
   fs: Required<FileSystemServeOptions>
   middlewareMode: NonNullable<ServerOptions['middlewareMode']>
@@ -355,6 +355,10 @@ export interface ViteDevServer {
    * Start the server.
    */
   listen(port?: number, isRestart?: boolean): Promise<ViteDevServer>
+  listen(
+    listenOptions?: net.ListenOptions,
+    isRestart?: boolean,
+  ): Promise<ViteDevServer>
   /**
    * Stop the server.
    */
@@ -645,8 +649,16 @@ export async function _createServer(
         )
       }
     },
-    async listen(port?: number, isRestart?: boolean) {
-      await startServer(server, port)
+    async listen(
+      portOrListenOptions?: number | net.ListenOptions,
+      isRestart?: boolean,
+    ) {
+      const listenOptions =
+        typeof portOrListenOptions === 'number'
+          ? { port: portOrListenOptions }
+          : portOrListenOptions
+
+      await startServer(server, listenOptions)
       if (httpServer) {
         server.resolvedUrls = await resolveServerUrls(
           httpServer,
@@ -659,8 +671,12 @@ export async function _createServer(
       return server
     },
     openBrowser() {
+      // XXX this probably doesn't work for sockets
       const options = server.config.server
-      const url = getServerUrlByHost(server.resolvedUrls, options.host)
+      const url = getServerUrlByHost(
+        server.resolvedUrls,
+        options.listenOptions.host,
+      )
       if (url) {
         const path =
           typeof options.open === 'string'
@@ -712,7 +728,7 @@ export async function _createServer(
       if (server.resolvedUrls) {
         printServerUrls(
           server.resolvedUrls,
-          serverConfig.host,
+          serverConfig.listenOptions.host,
           config.logger.info,
         )
       } else if (middlewareMode) {
@@ -840,8 +856,11 @@ export async function _createServer(
 
   if (!middlewareMode && httpServer) {
     httpServer.once('listening', () => {
-      // update actual port since this may be different from initial value
-      serverConfig.port = (httpServer.address() as net.AddressInfo).port
+      // update actual port if applicable since this may be different from initial value
+      const actualAddress = httpServer.address()
+      if (actualAddress && typeof actualAddress === 'object') {
+        serverConfig.listenOptions.port = actualAddress.port
+      }
     })
   }
 
@@ -986,7 +1005,7 @@ export async function _createServer(
 
 async function startServer(
   server: ViteDevServer,
-  inlinePort?: number,
+  inlineListenOptions?: net.ListenOptions,
 ): Promise<void> {
   const httpServer = server.httpServer
   if (!httpServer) {
@@ -994,8 +1013,10 @@ async function startServer(
   }
 
   const options = server.config.server
-  const hostname = await resolveHostname(options.host)
-  const configPort = inlinePort ?? options.port
+  const hostname = await resolveHostname(
+    inlineListenOptions?.host ?? options.listenOptions.host,
+  )
+  const configPort = inlineListenOptions?.port ?? options.listenOptions.port
   // When using non strict port for the dev server, the running port can be different from the config one.
   // When restarting, the original port may be available but to avoid a switch of URL for the running
   // browser tabs, we enforce the previously used port, expect if the config port changed.
@@ -1005,13 +1026,20 @@ async function startServer(
       : configPort) ?? DEFAULT_DEV_PORT
   server._configServerPort = configPort
 
-  const serverPort = await httpServerStart(httpServer, {
-    port,
+  await httpServerStart(httpServer, {
+    listenOptions: {
+      ...inlineListenOptions,
+      host: hostname.name,
+      port,
+    },
     strictPort: options.strictPort,
-    host: hostname.host,
     logger: server.config.logger,
   })
-  server._currentServerPort = serverPort
+
+  const actualAddress = httpServer.address()
+  if (actualAddress && typeof actualAddress === 'object') {
+    server._currentServerPort = actualAddress.port
+  }
 }
 
 export function createServerCloseFn(
@@ -1094,6 +1122,7 @@ export function resolveServerOptions(
   const _server = mergeWithDefaults(
     {
       ...serverConfigDefaults,
+      // REVIEW how default host applied? why not here?
       host: undefined, // do not set here to detect whether host is set or not
       sourcemapIgnoreList: isInNodeModules,
     },
@@ -1102,6 +1131,11 @@ export function resolveServerOptions(
 
   const server: ResolvedServerOptions = {
     ..._server,
+    listenOptions: {
+      port: _server.port,
+      // HERE properly apply default host (boolean -> string)
+      host: _server.host as string,
+    },
     fs: {
       ..._server.fs,
       // run searchForWorkspaceRoot only if needed
@@ -1219,18 +1253,14 @@ async function restartServer(server: ViteDevServer) {
     newServer._setInternalServer(server)
   }
 
-  const {
-    logger,
-    server: { port, middlewareMode },
-  } = server.config
-  if (!middlewareMode) {
-    await server.listen(port, true)
+  if (!server.config.server.middlewareMode) {
+    await server.listen(server.config.server.listenOptions, true)
   } else {
     await Promise.all(
       Object.values(server.environments).map((e) => e.listen(server)),
     )
   }
-  logger.info('server restarted.', { timestamp: true })
+  server.config.logger.info('server restarted.', { timestamp: true })
 
   if (shortcutsOptions) {
     shortcutsOptions.print = false
@@ -1249,21 +1279,18 @@ export async function restartServerWithUrls(
     return
   }
 
-  const { port: prevPort, host: prevHost } = server.config.server
+  const { port: prevPort, host: prevHost } = server.config.server.listenOptions
   const prevUrls = server.resolvedUrls
 
   await server.restart()
 
-  const {
-    logger,
-    server: { port, host },
-  } = server.config
   if (
-    (port ?? DEFAULT_DEV_PORT) !== (prevPort ?? DEFAULT_DEV_PORT) ||
-    host !== prevHost ||
+    (server.config.server.listenOptions.port ?? DEFAULT_DEV_PORT) !==
+      (prevPort ?? DEFAULT_DEV_PORT) ||
+    server.config.server.listenOptions.host !== prevHost ||
     diffDnsOrderChange(prevUrls, server.resolvedUrls)
   ) {
-    logger.info('')
+    server.config.logger.info('')
     server.printUrls()
   }
 }

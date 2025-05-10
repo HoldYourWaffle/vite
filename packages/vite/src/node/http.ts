@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import type { OutgoingHttpHeaders as HttpServerHeaders } from 'node:http'
 import type { ServerOptions as HttpsServerOptions } from 'node:https'
+import type * as net from 'node:net'
 import type { Connect } from 'dep-types/connect'
 import colors from 'picocolors'
 import type { ProxyOptions } from './server/middlewares/proxy'
@@ -24,6 +25,12 @@ export interface CommonServerOptions {
    * Set to 0.0.0.0 to listen on all addresses, including LAN and public addresses.
    */
   host?: string | boolean
+  /**
+   * DOCUMENT
+   * XXX Overrides `port` and `host`?
+   * @see https://nodejs.org/api/net.html#serverlistenoptions-callback
+   */
+  listenOptions?: net.ListenOptions
   /**
    * The hostnames that Vite is allowed to respond to.
    * `localhost` and subdomains under `.localhost` and all IP addresses are allowed by default.
@@ -168,25 +175,37 @@ async function readFileIfExists(value?: string | Buffer | any[]) {
 export async function httpServerStart(
   httpServer: HttpServer,
   serverOptions: {
-    port: number
+    listenOptions: net.ListenOptions
     strictPort: boolean | undefined
-    host: string | undefined
     logger: Logger
   },
-): Promise<number> {
-  let { port, strictPort, host, logger } = serverOptions
+): Promise<void> {
+  const { listenOptions, strictPort, logger } = serverOptions
 
   return new Promise((resolve, reject) => {
-    const onError = (e: Error & { code?: string }) => {
-      if (e.code === 'EADDRINUSE') {
+    const onError = (e: NodeJS.ErrnoException) => {
+      if (e.code !== 'EADDRINUSE') {
+        httpServer.removeListener('error', onError)
+        reject(e)
+        return
+      }
+
+      // With `node:net`'s `server.listen` providing `port` takes precedence over `path`
+      if (listenOptions.port) {
         if (strictPort) {
           httpServer.removeListener('error', onError)
-          reject(new Error(`Port ${port} is already in use`))
+          reject(new Error(`Port ${listenOptions.port} is already in use`))
         } else {
-          logger.info(`Port ${port} is in use, trying another one...`)
-          httpServer.listen(++port, host)
+          logger.info(
+            `Port ${listenOptions.port} is in use, trying another one...`,
+          )
+          httpServer.listen({ ...listenOptions, port: ++listenOptions.port })
         }
+      } else if (listenOptions.path) {
+        httpServer.removeListener('error', onError)
+        reject(new Error(`Socket ${listenOptions.path} is already in use`))
       } else {
+        // Shenanigans: no port and no path, how can address be in use?
         httpServer.removeListener('error', onError)
         reject(e)
       }
@@ -194,9 +213,30 @@ export async function httpServerStart(
 
     httpServer.on('error', onError)
 
-    httpServer.listen(port, host, () => {
+    httpServer.listen(listenOptions, () => {
       httpServer.removeListener('error', onError)
-      resolve(port)
+
+      if (listenOptions.path) {
+        // XXX this should probably be moved somewhere else
+        // info(`  > Socket: ${chalk.cyan(socket)}`)
+        // CHECK this feels unnecessary?
+        // for (const eventType of [`SIGINT`, `SIGUSR1`, `SIGUSR2`, /*`uncaughtException`,*/ `SIGTERM`]) {
+        //   process.on(eventType, () => {
+        //     info(`Exiting with event type ${eventType}`)
+        //     process.exit()
+        //   })
+        // }
+      }
+
+      process.on('exit', () => {
+        if (listenOptions.path) {
+          fsp.unlink(listenOptions.path)
+        }
+      })
+
+      // XXX can't resolve with "chosen port" if might not be port
+      // resolve(port)
+      resolve()
     })
   })
 }

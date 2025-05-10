@@ -44,7 +44,10 @@ import { hostCheckMiddleware } from './server/middlewares/hostCheck'
 export interface PreviewOptions extends CommonServerOptions {}
 
 export interface ResolvedPreviewOptions
-  extends RequiredExceptFor<PreviewOptions, 'host' | 'https' | 'proxy'> {}
+  extends RequiredExceptFor<
+    PreviewOptions,
+    'port' | 'host' | 'https' | 'proxy'
+  > {}
 
 export function resolvePreviewOptions(
   preview: PreviewOptions | undefined,
@@ -54,9 +57,16 @@ export function resolvePreviewOptions(
   // except for the port to enable having both the dev and preview servers running
   // at the same time without extra configuration
   return {
-    port: preview?.port ?? DEFAULT_PREVIEW_PORT,
+    listenOptions: {
+      ...server.listenOptions,
+      // Only apply default port if no socket path was provided, because port takes precedence over path
+      port:
+        preview?.port ??
+        (server.listenOptions.path ? undefined : DEFAULT_PREVIEW_PORT),
+      // HERE apply boolean -> string default
+      host: (preview?.host as string) ?? server.listenOptions.host,
+    },
     strictPort: preview?.strictPort ?? server.strictPort,
-    host: preview?.host ?? server.host,
     allowedHosts: preview?.allowedHosts ?? server.allowedHosts,
     https: preview?.https ?? server.https,
     open: preview?.open ?? server.open,
@@ -263,9 +273,11 @@ export async function preview(
   const hostname = await resolveHostname(options.host)
 
   await httpServerStart(httpServer, {
-    port: options.port,
+    listenOptions: {
+      ...options.listenOptions,
+      host: hostname.host,
+    },
     strictPort: options.strictPort,
-    host: hostname.host,
     logger,
   })
 

@@ -147,6 +147,7 @@ export function createWebSocketServer(
   const hmrServer = hmr && hmr.server
   const hmrPort = hmr && hmr.port
   // TODO: the main server port may not have been chosen yet as it may use the next available
+  // HERE
   const portsAreCompatible = !hmrPort || hmrPort === config.server.port
   const wsServer = hmrServer || (portsAreCompatible && server)
   let hmrServerWsListener: (
